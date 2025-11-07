@@ -1,0 +1,229 @@
+---
+title: "Flights + Weather (NYC 2013) – Dashboard"
+output:
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    vertical_layout: fill
+    theme: cosmo
+---
+
+
+```{r setup, include=FALSE}
+# ---- Robust Setup ----
+options(warn = 1)
+
+library(flexdashboard)
+library(tidyverse)
+library(nycflights13)
+library(lubridate)
+library(janitor)
+library(DT)
+library(ggplot2)
+
+# 1) Flights vorbereiten
+flights2 <- flights %>%
+  mutate(
+    dep_hour = if_else(!is.na(dep_time), dep_time %/% 100, sched_dep_time %/% 100),
+    dep_hour = pmin(dep_hour, 23)
+  )
+
+# 2) Weather Spalten
+weather2 <- weather %>%
+  select(origin, year, month, day, hour, temp, dewp, humid,
+         wind_dir, wind_speed, wind_gust, precip, pressure, visib)
+
+# 3) Join + Cleaning
+daten <- flights2 %>%
+  left_join(weather2, by = c("origin","year","month","day","dep_hour"="hour")) %>%
+  clean_names() %>%
+  mutate(
+    date = make_date(year, month, day),
+    is_delayed = dep_delay > 15 | arr_delay > 15,
+    delay_total = coalesce(arr_delay, 0) + coalesce(dep_delay, 0),
+    precip = replace_na(precip, 0),
+    wind_speed = replace_na(wind_speed, 0),
+    visib = replace_na(visib, 0)
+  )
+
+# 4) Flüge ohne Wetter raus
+daten_clean <- daten %>% filter(!is.na(temp))
+
+# 5) Nur echte Flüge mit Delay
+daten_final <- daten_clean %>%
+  filter(!is.na(arr_delay), !is.na(dep_delay))
+```
+
+# 1) Überblick
+
+## Row
+
+### Kennzahlen
+```{r}
+c(
+  rows_daten_final = nrow(daten_final),
+  airports = dplyr::n_distinct(daten_final$origin)
+)
+```
+
+
+### Vorschau
+```{r}
+DT::datatable(head(daten_final, 20))
+```
+
+
+---
+
+### 🔹 **3. Ankunftsverspätung vs. Windgeschwindigkeit (Diagramm)**
+
+```{r}
+ggplot(daten_final, aes(wind_speed, arr_delay)) +
+  geom_point(alpha = 0.1, color = "steelblue") +
+  labs(
+    x = "Windgeschwindigkeit (mph)",
+    y = "Ankunftsverspätung (Minuten)",
+    title = "Ankunftsverspätung vs. Windgeschwindigkeit"
+  ) +
+  theme_minimal()
+```
+
+
+
+### Durchschnittliche Verspätung nach Monat
+```{r}
+daten_final %>%
+  group_by(month) %>%
+  summarise(avg_delay = mean(arr_delay, na.rm = TRUE)) %>%
+  ggplot(aes(x = month, y = avg_delay)) +
+  geom_col(fill = "darkorange") +
+  labs(
+    x = "Monat",
+    y = "Ø Ankunftsverspätung (Minuten)",
+    title = "Durchschnittliche Verspätung pro Monat"
+  ) +
+  theme_minimal()
+```
+
+# 2) Wetter
+
+## Row
+
+
+---
+
+### Temperatur vs. Verspätung**
+
+```r
+### Temperatur vs. Ankunftsverspätung
+```{r}
+daten_final %>%
+  mutate(temp_bin = floor(temp)) %>%
+  group_by(temp_bin) %>%
+  summarise(avg_delay = mean(arr_delay, na.rm = TRUE), .groups = "drop") %>%
+  ggplot(aes(temp_bin, avg_delay)) +
+  geom_line() +
+  geom_point() +
+  labs(x = "Temperatur (°F, gerundet)", y = "Ø Ankunftsverspätung (Min.)",
+       title = "Ø Verspätung nach Temperatur")
+```
+
+### Ø Verspätung nach Windgeschwindigkeit
+```{r}
+daten_final %>%
+  mutate(wind_bin = cut(wind_speed,
+                        breaks = c(0,5,10,15,20,25,30,40,Inf),
+                        right = FALSE,
+                        include.lowest = TRUE)) %>%
+  group_by(wind_bin) %>%
+  summarise(avg_delay = mean(arr_delay, na.rm = TRUE), n = dplyr::n(), .groups = "drop") %>%
+  ggplot(aes(wind_bin, avg_delay)) +
+  geom_col() +
+  labs(x = "Windgeschwindigkeit (mph, Bins)", y = "Ø Ankunftsverspätung (Min.)",
+       title = "Durchschnittliche Verspätung nach Windgeschwindigkeit") +
+  coord_flip()
+```
+
+
+---
+
+### 🔹 Ø Verspätung nach **Sichtweite**
+```markdown
+### Ø Verspätung nach Sichtweite
+```{r}
+daten_final %>%
+  mutate(visib_bin = cut(visib,
+                         breaks = c(0,1,2,3,5,7,10,Inf),
+                         right = FALSE,
+                         include.lowest = TRUE)) %>%
+  group_by(visib_bin) %>%
+  summarise(avg_delay = mean(arr_delay, na.rm = TRUE), n = dplyr::n(), .groups = "drop") %>%
+  ggplot(aes(visib_bin, avg_delay)) +
+  geom_col() +
+  labs(x = "Sichtweite (Meilen, Bins)", y = "Ø Ankunftsverspätung (Min.)",
+       title = "Durchschnittliche Verspätung nach Sichtweite") +
+  coord_flip()
+```
+
+
+---
+
+### 🔹 **Verspätungsquote** nach **Regenstärke**
+(Anteil Flüge mit Verspätung > 15 min je Niederschlags-Bin)
+```markdown
+### Verspätungsquote nach Regenstärke
+```{r}
+daten_final %>%
+  mutate(precip_bin = cut(precip,
+                          breaks = c(0, 0.01, 0.05, 0.1, 0.25, 0.5, Inf),
+                          right = FALSE, include.lowest = TRUE),
+         delayed = arr_delay > 15) %>%
+  group_by(precip_bin) %>%
+  summarise(rate_delayed = mean(delayed, na.rm = TRUE) * 100,
+            n = dplyr::n(), .groups = "drop") %>%
+  ggplot(aes(precip_bin, rate_delayed)) +
+  geom_col() +
+  labs(x = "Niederschlag (inch, Bins)", y = "Anteil verspätet (%)",
+       title = "Verspätungsquote nach Regenstärke") +
+  coord_flip()
+```
+
+# 3) Airlines
+
+## Row
+
+### Durchschnittliche Verspätung pro Airline
+```{r}
+daten_final %>%
+  group_by(carrier) %>%
+  summarise(avg_arr = mean(arr_delay, na.rm = TRUE),
+            flights = n()) %>%
+  arrange(desc(avg_arr)) %>%
+  ggplot(aes(reorder(carrier, avg_arr), avg_arr, fill = flights)) +
+  geom_col() +
+  coord_flip() +
+  labs(x = "Airline (Carrier-Code)", y = "Ø Ankunftsverspätung (Min.)",
+       title = "Durchschnittliche Verspätung pro Airline") +
+  theme_minimal()
+```
+
+# 4) Zeit/Saison
+
+## Row
+
+### Ø Verspätung pro Wochentag
+```{r}
+daten_final %>%
+  mutate(weekday = wday(make_date(year, month, day), label = TRUE, abbr = TRUE)) %>%
+  group_by(weekday) %>%
+  summarise(avg_delay = mean(arr_delay, na.rm = TRUE)) %>%
+  ggplot(aes(weekday, avg_delay)) +
+  geom_col(fill = "dodgerblue") +
+  labs(
+    x = "Wochentag",
+    y = "Ø Ankunftsverspätung (Min.)",
+    title = "Durchschnittliche Verspätung pro Wochentag"
+  ) +
+  theme_minimal()
+```
+
+
